@@ -1,0 +1,10 @@
+services:
+  web:
+    image: hackspace:local
+    build: .
+    init: true
+    environment:
+      HACKSPACE_DEMO: "1"
+      APP_URL: http://localhost:3000
+    ports:
+      - "127.0.0.1:3000:3000"

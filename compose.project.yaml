@@ -1,0 +1,61 @@
+x-database-url: &database-url "postgresql://hackspace:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}@db:5432/hackspace"
+
+x-workspace: &workspace
+  HACKSPACE_DEMO: "0"
+  APP_URL: ${APP_URL:-http://localhost:3000}
+  DATABASE_URL: *database-url
+  SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env.docker}
+  GITHUB_OWNER: ${GITHUB_OWNER:?Set GITHUB_OWNER in .env.docker}
+  GITHUB_REPO: ${GITHUB_REPO:?Set GITHUB_REPO in .env.docker}
+  GITHUB_PROJECT_NUMBER: ${GITHUB_PROJECT_NUMBER:?Set GITHUB_PROJECT_NUMBER in .env.docker}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+  ALLOW_PRIVATE_DEEPSEEK: ${ALLOW_PRIVATE_DEEPSEEK:-0}
+
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: hackspace
+      POSTGRES_DB: hackspace
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "hackspace", "-d", "hackspace"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: hackspace:local
+    pull_policy: never
+    command: ["node", "--import", "tsx", "scripts/migrate.ts"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    environment:
+      <<: *workspace
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?Set GITHUB_CLIENT_ID in .env.docker}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?Set GITHUB_CLIENT_SECRET in .env.docker}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: hackspace:local
+    pull_policy: never
+    init: true
+    command: ["node", "--import", "tsx", "scripts/worker.ts"]
+    environment: *workspace
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 2m
+
+volumes:
+  postgres-data:

@@ -40,7 +40,14 @@ flowchart LR
 
 ## Быстрый старт: локальное демо
 
-Нужен **Node.js 22.18+**. Ключи, GitHub App и PostgreSQL для демо не нужны.
+Ключи, GitHub App и PostgreSQL для демо не нужны. Если установлен **Docker с Compose**, из корня репозитория выполните:
+
+```sh
+docker compose up --build
+```
+
+<details>
+<summary>Запуск без Docker (Node.js 22.18+)</summary>
 
 ```sh
 npm ci
@@ -48,7 +55,11 @@ cp .env.example .env.local
 npm run dev -- --webpack --hostname 127.0.0.1
 ```
 
+</details>
+
 Откройте **<http://localhost:3000>**. Попробуйте перенести карточку, открыть «План задач» и добавить замер, указав SHA из вкладки «Результаты». Генерация схемы в демо имитируется: файлы никуда не отправляются, а изменения сбрасываются после перезапуска.
+
+Для остановки контейнера выполните `docker compose down`.
 
 <a name="setup"></a>
 
@@ -70,24 +81,41 @@ npm run dev -- --webpack --hostname 127.0.0.1
 
 ### 2. Настройте окружение
 
-Скопируйте [`.env.example`](.env.example) в `.env.local`, если не сделали этого для демо, и заполните настройки:
+Для Docker скопируйте [`.env.docker.example`](.env.docker.example) в `.env.docker`. Для запуска через npm используйте [`.env.example`](.env.example) и `.env.local`.
 
 | Переменные | Что указать |
 | --- | --- |
-| `HACKSPACE_DEMO` | `0` для реального проекта. |
+| `HACKSPACE_DEMO` | `0` при запуске через npm. Compose переключает режим сам. |
 | `APP_URL` | Адрес, по которому пользователи открывают приложение, без пути. Для общего сервиса нужен HTTPS; локально допускается HTTP на loopback. |
-| `DATABASE_URL`, `SESSION_SECRET` | URL PostgreSQL-базы и случайный секрет. Для генерации секрета: `openssl rand -base64 32`. |
+| `SESSION_SECRET` | Случайный секрет: `openssl rand -base64 32`. |
+| `POSTGRES_PASSWORD` | Для Docker: пароль PostgreSQL без специальных символов URL, например вывод `openssl rand -hex 32`. Compose сам формирует URL базы. |
+| `DATABASE_URL` | Только при запуске через npm: URL вашей PostgreSQL-базы. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Данные GitHub App. |
 | `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_PROJECT_NUMBER` | Организация, имя репозитория без организации и номер из URL `/orgs/<owner>/projects/<number>`. |
 | `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` | Необязательные настройки генерации. По умолчанию `deepseek-flash`; альтернатива — `deepseek-v4-pro`. |
 | `ALLOW_PRIVATE_DEEPSEEK` | По умолчанию `0`. Установите `1`, только если команда разрешила передачу файлов непубличного репозитория в DeepSeek. |
 
 > [!IMPORTANT]
-> Не публикуйте `.env.local`, ключи и секреты. Перед запуском генерации участник подтверждает точный список файлов для зафиксированного SHA. Фильтрация чувствительных файлов снижает риск утечки, но не заменяет проверку списка.
+> Не публикуйте `.env.docker`, `.env.local`, ключи и секреты. Перед запуском генерации участник подтверждает точный список файлов для зафиксированного SHA. Фильтрация чувствительных файлов снижает риск утечки, но не заменяет проверку списка.
 
 ### 3. Запустите приложение
 
-Создайте пустую базу и выполните:
+**Через Docker Compose**:
+
+```sh
+docker compose --env-file .env.docker -f compose.yaml -f compose.project.yaml up --build -d
+```
+
+Compose поднимет PostgreSQL, применит схему и только потом запустит приложение и воркер. Данные PostgreSQL сохраняются в томе `postgres-data` после обычного `down`; база не публикует порт на хосте. Приложение слушает порт 3000 только на loopback хоста. Для общего сервиса поставьте перед ним HTTPS-прокси и укажите внешний адрес в `APP_URL` и в callback GitHub App.
+
+```sh
+docker compose --env-file .env.docker -f compose.yaml -f compose.project.yaml down
+```
+
+<details>
+<summary>Запуск через npm вместо Docker</summary>
+
+Создайте пустую PostgreSQL-базу и выполните:
 
 ```sh
 npm ci
@@ -101,6 +129,8 @@ npm start
 ```sh
 npm run worker
 ```
+
+</details>
 
 Начните с тестового Project: перенесите карточку из HackSpace и проверьте новый статус в GitHub. Затем проверьте, что участник с доступом только на чтение не может изменить статус.
 
@@ -132,4 +162,4 @@ npm run build
 
 ## Лицензия
 
-Лицензия пока не выбрана. В репозитории ещё нет файла `LICENSE`.
+Проект распространяется по [лицензии MIT](LICENSE).
