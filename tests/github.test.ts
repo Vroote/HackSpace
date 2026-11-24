@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { changeStatus, githubAccess, readBoard } from "../lib/github";
+import { changeStatus, githubAccess, readBoard, readPullRequests } from "../lib/github";
 
 const config = { owner: "example", repo: "hackathon", project: 4 };
 const token = "ghu_test";
@@ -34,14 +34,22 @@ test("GitHub access requires explicit repository installation access and marks i
   await assert.rejects(githubAccess(token, config), { status: 403 });
 });
 
-test("GitHub board excludes pull-request items and marks incomplete blocker data", async (context) => {
+test("GitHub board excludes pull-request items, tracks linked PR states, and marks incomplete blockers", async (context) => {
+  const linkedPulls = [
+    { state: "OPEN", isDraft: true, mergeStateStatus: "CLEAN" },
+    { state: "OPEN", isDraft: false, mergeStateStatus: "CLEAN" },
+    { state: "OPEN", isDraft: false, mergeStateStatus: "BLOCKED" },
+    { state: "OPEN", isDraft: false, mergeStateStatus: "UNKNOWN" },
+    { state: "MERGED", isDraft: false, mergeStateStatus: "UNKNOWN" },
+    { state: "CLOSED", isDraft: false, mergeStateStatus: "UNKNOWN" },
+  ].map((pull, index) => ({ ...pull, number: 23 + index, url: `https://github.com/example/hackathon/pull/${23 + index}` }));
   context.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
     const { query } = JSON.parse(String(init.body));
     if (query.includes("GitHubScope")) return Response.json({ data: scope });
     if (query.includes("BoardItems")) return Response.json({ data: { node: { items: { pageInfo, nodes: [
       { id: "item", isArchived: false, status: { optionId: "todo" }, content: { ...issue,
         assignees: { nodes: [{ login: "person", avatarUrl: "" }], pageInfo },
-        pulls: { nodes: [{ number: 23, url: "https://github.com/example/hackathon/pull/23", state: "OPEN", isDraft: true }], pageInfo },
+        pulls: { nodes: linkedPulls, pageInfo },
       } },
       { id: "pr-item", isArchived: false, content: { __typename: "PullRequest" } },
     ] } } } });
@@ -52,7 +60,7 @@ test("GitHub board excludes pull-request items and marks incomplete blocker data
   const board = await readBoard(token, config);
   assert.equal(board.issues.length, 1);
   assert.equal(board.issues[0].assignees[0].login, "person");
-  assert.equal(board.issues[0].pulls[0].state, "DRAFT");
+  assert.deepEqual(board.issues[0].pulls.map(({ state }) => state), ["DRAFT", "READY", "OPEN", "OPEN", "MERGED", "CLOSED"]);
   assert.equal(board.issues[0].blockersUnknown, true);
 });
 
@@ -70,4 +78,53 @@ test("status mutation rejects a foreign item or a viewer with read-only project 
   canWrite = false;
   await assert.rejects(changeStatus(token, config, "item", "todo"), { status: 403 });
   assert.equal(mock.mock.callCount(), 3);
+});
+
+test("repository PR pages include unlinked PRs, authors, and every status", async (context) => {
+  const newer = {
+    number: 30, title: "PR without an issue", url: "https://github.com/example/hackathon/pull/30",
+    state: "OPEN", isDraft: false, mergeStateStatus: "CLEAN", reviewDecision: "APPROVED",
+    headRefName: "feature", baseRefName: "main", updatedAt: "2026-11-19T10:00:00Z",
+    author: { login: "person", avatarUrl: "", url: "https://github.com/person" },
+  };
+  const older = { ...newer, number: 29, state: "CLOSED", author: null, reviewDecision: null };
+  context.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    const { query, variables } = JSON.parse(String(init.body));
+    assert.match(query, /states: \[OPEN, CLOSED, MERGED\]/);
+    assert.equal(variables.owner, "example");
+    assert.equal(variables.repo, "hackathon");
+    return Response.json({ data: { repository: { nameWithOwner: "example/hackathon", pullRequests: {
+      nodes: variables.after === null ? [newer] : [older],
+      totalCount: 2,
+      pageInfo: { hasNextPage: variables.after === null, endCursor: "next-page" },
+    } } } });
+  });
+
+  const first = await readPullRequests(token, config, null);
+  assert.equal(first.totalCount, 2);
+  assert.equal(first.nextCursor, "next-page");
+  assert.equal(first.pulls[0].state, "READY");
+  assert.deepEqual(first.pulls[0].author, newer.author);
+  assert.equal(first.pulls[0].headRefName, "feature");
+  assert.equal(first.pulls[0].reviewDecision, "APPROVED");
+  const next = await readPullRequests(token, config, first.nextCursor);
+  assert.equal(next.nextCursor, null);
+  assert.equal(next.pulls[0].state, "CLOSED");
+  assert.equal(next.pulls[0].author, null);
+});
+
+test("personal review search scopes the cursor and request time to the viewer", async (context) => {
+  context.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    const { variables } = JSON.parse(String(init.body));
+    assert.match(variables.query, /repo:example\/hackathon is:pr is:open user-review-requested:@me/);
+    assert.equal(variables.after, "page2");
+    return Response.json({ data: { viewer: { login: "me" }, search: {
+      totalCount: 1, pageInfo, nodes: [{ number: 7, state: "OPEN", timelineItems: { nodes: [
+        { requestedReviewer: { login: "me" }, createdAt: "2026-11-22T12:00:00Z" },
+        { requestedReviewer: { login: "other" }, createdAt: "2026-11-22T13:00:00Z" },
+      ] } }],
+    } } });
+  });
+  const page = await readPullRequests(token, config, "page2", true);
+  assert.equal(page.pulls[0].reviewRequestedAt, "2026-11-22T12:00:00Z");
 });

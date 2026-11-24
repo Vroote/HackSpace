@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS architecture_jobs (
   started_at timestamptz
 );
 
+ALTER TABLE architecture_jobs ADD COLUMN IF NOT EXISTS generation_comment text;
+
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_architecture_job
   ON architecture_jobs (workspace) WHERE status IN ('pending', 'running');
 
@@ -50,5 +52,18 @@ CREATE TABLE IF NOT EXISTS measurements (
 );
 
 CREATE INDEX IF NOT EXISTS measurements_by_time ON measurements (workspace, tested_at, id);
+
+ALTER TABLE measurements ADD COLUMN IF NOT EXISTS suite text;
+ALTER TABLE measurements ADD COLUMN IF NOT EXISTS version text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS measurement_workspace_id ON measurements (workspace, id);
+
+CREATE TABLE IF NOT EXISTS demo_builds (
+  workspace text PRIMARY KEY,
+  measurement_id bigint NOT NULL,
+  stand_url text NOT NULL,
+  reason text NOT NULL,
+  FOREIGN KEY (workspace, measurement_id) REFERENCES measurements(workspace, id)
+);
 
 COMMIT;

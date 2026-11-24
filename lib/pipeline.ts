@@ -21,9 +21,10 @@ export function analyzePipeline(board: Board) {
       if (seen.has(blocker.id) || blocker.completed) continue;
       seen.add(blocker.id);
       const outside = !allIds.has(blocker.id) ? " · вне плана" : "";
+      const reference = `#${blocker.number} «${blocker.title}»`;
       messages.push(blocker.state === "OPEN"
-        ? `Ждёт #${blocker.number}${outside}`
-        : `Блокер #${blocker.number} закрыт не как выполненный${outside}`);
+        ? `Ждёт ${reference}${outside}`
+        : `Блокер ${reference} закрыт не как выполненный${outside}`);
       if (blocker.state !== "OPEN" || !ids.has(blocker.id)) continue;
       edges.push({ source: blocker.id, target: issue.id });
       outgoing.get(blocker.id)!.push(issue.id);
@@ -50,4 +51,34 @@ export function analyzePipeline(board: Board) {
   const unresolvedIds = open.filter((issue) => !ordered.has(issue.id)).map((issue) => issue.id);
   for (const id of unresolvedIds) reasons[id].push("Есть цикл зависимостей в цепочке");
   return { readyIds, columns, edges, unresolvedIds, reasons };
+}
+
+// Project completion satisfies an in-project dependency without closing the GitHub Issue.
+export function doneIssueIds(board: Board) {
+  const statuses = new Set(board.statuses.filter(({ name }) => /^(done|готово)$/i.test(name.trim())).map(({ id }) => id));
+  return new Set(board.issues.filter(({ statusId }) => statusId && statuses.has(statusId)).map(({ id }) => id));
+}
+
+export function resolveProjectBlockers(board: Board): Board {
+  const done = doneIssueIds(board);
+  return { ...board, issues: board.issues.map(issue => ({
+    ...issue, blockers: issue.blockers.map(blocker => done.has(blocker.id) && blocker.state === "OPEN"
+      ? { ...blocker, completed: true } : blocker),
+  })) };
+}
+
+export type UnlockHistory = { blocked: string[]; unread: string[] };
+
+export function observeUnlocks(board: Board, login: string, previous: UnlockHistory): UnlockHistory {
+  if (board.stale) return previous;
+  const done = doneIssueIds(board);
+  const blocked = [];
+  const unread = [];
+  for (const issue of board.issues) {
+    if (issue.state !== "OPEN" || done.has(issue.id) || !issue.assignees.some(person => person.login.toLowerCase() === login.toLowerCase())) continue;
+    const wasBlocked = previous.blocked.includes(issue.id);
+    if (issue.blockers.some(blocker => !blocker.completed) || (issue.blockersUnknown && wasBlocked)) blocked.push(issue.id);
+    else if (!issue.blockersUnknown && (wasBlocked || previous.unread.includes(issue.id))) unread.push(issue.id);
+  }
+  return { blocked, unread };
 }

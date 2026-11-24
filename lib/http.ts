@@ -68,5 +68,30 @@ export function measurement(body: Record<string, unknown>) {
   if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
     throw new HttpError(422, "Балл должен быть от 0 до 100");
   }
-  return { sha: sha.trim().toLowerCase(), testedAt: timestamp, score };
+  const series = body.suite === undefined && body.version === undefined ? {} : {
+    suite: boundedText(body.suite, 80, true), version: boundedText(body.version, 80, true),
+  };
+  return { ...series, sha: sha.trim().toLowerCase(), testedAt: timestamp, score };
+}
+
+function boundedText(value: unknown, max: number, required = false) {
+  if (value == null && !required) return "";
+  if (typeof value !== "string" || value.trim().length > max || (required && !value.trim())) {
+    throw new HttpError(422, "Проверьте заполнение и длину текстовых полей");
+  }
+  return value.trim();
+}
+
+export function demoBuildInput(body: Record<string, unknown>) {
+  const resultId = boundedText(body.resultId, 128, true);
+  const reason = boundedText(body.reason, 500);
+  const standUrl = boundedText(body.standUrl, 2048);
+  if (standUrl) {
+    let url: URL;
+    try { url = new URL(standUrl); } catch { throw new HttpError(422, "Проверьте адрес стенда"); }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+      throw new HttpError(422, "Укажите HTTP(S)-адрес стенда без учётных данных");
+    }
+  }
+  return { resultId, reason, standUrl };
 }

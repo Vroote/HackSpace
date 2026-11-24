@@ -2,10 +2,10 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import type { Result } from "@/lib/types";
+import type { DemoBuild, Result } from "@/lib/types";
 import { EmptyState, Icon, formatDate } from "./ui";
 
-export type ResultInput = { sha: string; testedAt: string; score: number };
+export type ResultInput = { sha: string; testedAt: string; score: number; suite: string; version: string };
 
 function CommitLink({ sha, url }: { sha: string; url: string }) {
   return <a className="commit-link inline" href={url} target="_blank" rel="noreferrer" title={sha} aria-label={`Коммит ${sha}`}>
@@ -118,13 +118,15 @@ function ResultForm({ busy, defaultSha, onSubmit }: {
 }) {
   const [sha, setSha] = useState("");
   const [testedAt, setTestedAt] = useState(() => localDateTime(new Date()));
+  const [suite, setSuite] = useState("");
+  const [version, setVersion] = useState("");
   const [score, setScore] = useState("");
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const date = new Date(testedAt);
     if (!Number.isFinite(date.getTime()) || !sha.trim() || score === "") return;
-    if (await onSubmit({ sha: sha.trim(), testedAt: date.toISOString(), score: Number(score) })) {
+    if (await onSubmit({ sha: sha.trim(), testedAt: date.toISOString(), score: Number(score), suite, version })) {
       setSha("");
       setScore("");
       setTestedAt(localDateTime(new Date()));
@@ -144,6 +146,10 @@ function ResultForm({ busy, defaultSha, onSubmit }: {
       <input id="result-date" type="datetime-local" value={testedAt} onChange={(event) => setTestedAt(event.target.value)}
         required disabled={busy} aria-describedby="time-zone-hint" />
       <small className="muted" id="time-zone-hint">Местное время</small>
+      <label>Набор тестов<input required maxLength={80} value={suite} disabled={busy}
+        onChange={event => setSuite(event.target.value)} placeholder="validation" /></label>
+      <label>Версия набора<input required maxLength={80} value={version} disabled={busy}
+        onChange={event => setVersion(event.target.value)} placeholder="v2" /></label>
       <label htmlFor="result-score">Балл</label>
       <div className="score-input">
         <input id="result-score" type="number" min="0" max="100" step="any" inputMode="decimal" placeholder="0–100"
@@ -155,15 +161,60 @@ function ResultForm({ busy, defaultSha, onSubmit }: {
   );
 }
 
-export function ResultsView({ results, canWrite, busy, defaultSha, onSubmit }: {
+function seriesKey(result: Result) {
+  return JSON.stringify([result.suite ?? null, result.version ?? null]);
+}
+
+function seriesLabel(result: Result) {
+  return result.suite ? `${result.suite} · ${result.version}` : "Без данных о наборе";
+}
+
+function BuildForm({ result, initial, busy, onSelect, onClose }: {
+  result: Result; initial: DemoBuild | null; busy: boolean;
+  onSelect: (selection: DemoBuild) => Promise<boolean>; onClose: () => void;
+}) {
+  const [standUrl, setUrl] = useState(initial?.standUrl ?? "");
+  const [reason, setReason] = useState(initial?.reason ?? "");
+  return <form className="result-form panel" onSubmit={async event => {
+    event.preventDefault();
+    if (await onSelect({ resultId: result.id, standUrl, reason })) onClose();
+  }}>
+    <h3>Выбор для демо · {result.sha.slice(0, 8)} · {result.score}/100</h3>
+    <label>Ссылка на стенд (необязательно)<input autoFocus type="url" maxLength={2048} value={standUrl}
+      onChange={event => setUrl(event.target.value)} disabled={busy} /></label>
+    <label>Причина выбора (необязательно)<input maxLength={500} value={reason}
+      onChange={event => setReason(event.target.value)} disabled={busy} /></label>
+    <div className="heading-actions"><button className="button button-primary" disabled={busy}>Сохранить выбор</button>
+      <button className="button" type="button" disabled={busy} onClick={onClose}>Отмена</button></div>
+  </form>;
+}
+
+export function ResultsView({ results, canWrite, busy, defaultSha, onSubmit, demoBuild, onSelect }: {
+  demoBuild: DemoBuild | null; onSelect: (selection: DemoBuild) => Promise<boolean>;
   results: Result[]; canWrite: boolean; busy: boolean; defaultSha: string | null;
   onSubmit: (value: ResultInput) => Promise<boolean>;
 }) {
-  const chronological = useMemo(() => [...results].sort((a, b) => new Date(a.testedAt).getTime() - new Date(b.testedAt).getTime()), [results]);
+  const [filter, setFilter] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const ordered = useMemo(() => [...results].sort((a, b) => new Date(a.testedAt).getTime() - new Date(b.testedAt).getTime()), [results]);
+  const groups = new Map(ordered.map(result => [seriesKey(result), seriesLabel(result)]));
+  const key = groups.has(filter) ? filter : ordered.length ? seriesKey(ordered[ordered.length - 1]) : "";
+  const chronological = ordered.filter(result => seriesKey(result) === key);
+  const chosen = results.find(result => result.id === demoBuild?.resultId);
+  const editing = results.find(result => result.id === editingId);
   const latest = chronological[chronological.length - 1];
 
   return (
     <>
+      <section className="panel result-form" aria-label="Сборка для демо">
+        <h2>Сборка для демо</h2>
+        {chosen && demoBuild ? <>
+          <div className="heading-actions"><CommitLink sha={chosen.sha} url={chosen.url} />
+            <span>{chosen.score}/100 · {seriesLabel(chosen)} · {formatDate(chosen.testedAt)}</span>
+            {demoBuild.standUrl && <a href={demoBuild.standUrl} target="_blank" rel="noreferrer">Открыть стенд</a>}
+          </div>{demoBuild.reason && <p>{demoBuild.reason}</p>}
+        </> : <span className="muted">Сборка пока не выбрана.</span>}
+      </section>
       <div className={`results-grid${canWrite ? " with-form" : ""}`}>
         <section className="panel chart-panel" aria-labelledby="chart-title">
           <div className="panel-heading">
@@ -171,6 +222,10 @@ export function ResultsView({ results, canWrite, busy, defaultSha, onSubmit }: {
             <div><h2 id="chart-title">Динамика баллов</h2><span className="muted">Внешние тесты · шкала 0–100</span></div>
             {latest && <div className="latest-score"><strong>{latest.score}</strong><span>Последний балл</span></div>}
           </div>
+          {groups.size > 0 && <label className="series-filter">Набор и версия
+            <select value={key} onChange={event => { setFilter(event.target.value); setEditingId(null); }}>
+              {[...groups].map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </select></label>}
           {chronological.length ? <ResultsChart results={chronological} />
             : <EmptyState icon="chart" title="Пока нет замеров">График появится после добавления результатов внешнего теста.</EmptyState>}
         </section>
@@ -178,19 +233,27 @@ export function ResultsView({ results, canWrite, busy, defaultSha, onSubmit }: {
       </div>
       <section className="panel history-panel" aria-labelledby="history-title">
         <div className="panel-heading"><span className="section-icon"><Icon name="clock" size={17} /></span>
-          <h2 id="history-title">История замеров</h2><span className="column-count">{results.length}</span>
+          <h2 id="history-title">История замеров</h2><span className="column-count">{chronological.length}</span>
         </div>
+        {editing && canWrite && <BuildForm key={editing.id} result={editing} initial={editing.id === demoBuild?.resultId ? demoBuild : null}
+          busy={busy} onSelect={onSelect} onClose={() => setEditingId(null)} />}
         {chronological.length ? <div className="history-scroll">
           <table>
-            <thead><tr><th scope="col">Время теста</th><th scope="col">Коммит</th><th scope="col">Балл</th><th scope="col">Автор</th></tr></thead>
-            <tbody>{[...chronological].reverse().map((result) => (
+            <thead><tr><th scope="col">Время теста</th><th scope="col">Коммит</th><th scope="col">Балл</th><th scope="col">Разница</th><th scope="col">Автор</th>{canWrite && <th scope="col">Демо</th>}</tr></thead>
+            <tbody>{chronological.map((result, index) => {
+              const delta = index && result.suite ? result.score - chronological[index - 1].score : null;
+              return (
               <tr key={result.id}>
                 <td><time dateTime={result.testedAt}>{formatDate(result.testedAt)}</time></td>
                 <td><CommitLink sha={result.sha} url={result.url} /></td>
                 <td><span className="score-chip">{result.score}<span>/100</span></span></td>
+                <td>{delta === null ? "—" : delta.toLocaleString("ru-RU", { signDisplay: "exceptZero", maximumFractionDigits: 6 })}</td>
                 <td className="muted">{result.author}</td>
+                {canWrite && <td><button className="button" disabled={busy} onClick={() => setEditingId(result.id)}>
+                  {chosen?.id === result.id ? "Изменить выбор" : "Выбрать для демо"}
+                </button></td>}
               </tr>
-            ))}</tbody>
+            ); }).reverse()}</tbody>
           </table>
         </div> : <div className="history-empty muted">Сохранённые замеры появятся здесь.</div>}
       </section>

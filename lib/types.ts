@@ -1,5 +1,16 @@
 export type Status = { id: string; name: string };
 export type Person = { login: string; avatarUrl: string };
+export type PullLink = { number: number; url: string; state: "DRAFT" | "OPEN" | "READY" | "MERGED" | "CLOSED" };
+export type PullRequest = PullLink & {
+  title: string;
+  author: (Person & { url: string }) | null;
+  headRefName: string;
+  baseRefName: string;
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  reviewRequestedAt?: string;
+  updatedAt: string;
+};
+export type PullRequestPage = { pulls: PullRequest[]; totalCount: number; nextCursor: string | null };
 export type Blocker = {
   id: string;
   number: number;
@@ -19,7 +30,7 @@ export type Issue = {
   assignees: Person[];
   blockers: Blocker[];
   blockersUnknown: boolean;
-  pulls: { number: number; url: string; state: "DRAFT" | "OPEN" | "MERGED" | "CLOSED" }[];
+  pulls: PullLink[];
 };
 export type Board = {
   statuses: Status[];
@@ -34,9 +45,11 @@ export type ArchitectureGraph = {
   nodes: { id: string; label: string; description: string; paths: string[] }[];
   edges: { source: string; target: string; label: string }[];
 };
+export const ARCHITECTURE_COMMENT_LIMIT = 1000;
 export type ArchitectureSnapshot = { sha: string; graph: ArchitectureGraph; createdAt: string };
 export type Job = { status: "pending" | "running" | "complete" | "failed"; error: string | null };
-export type Result = { id: string; sha: string; url: string; testedAt: string; score: number; author: string };
+export type DemoBuild = { resultId: string; standUrl: string; reason: string };
+export type Result = { suite?: string | null; version?: string | null; id: string; sha: string; url: string; testedAt: string; score: number; author: string };
 export type Workspace = {
   demo: boolean;
   user: Person;
@@ -46,5 +59,6 @@ export type Workspace = {
   defaultSha: string | null;
   architecture: ArchitectureSnapshot | null;
   job: Job | null;
+  demoBuild: DemoBuild | null;
   results: Result[];
 };

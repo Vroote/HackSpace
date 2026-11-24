@@ -1,4 +1,4 @@
-import type { Blocker, Board, Issue, Person, Status } from "@/lib/types";
+import type { Blocker, Board, Issue, Person, PullRequest, PullRequestPage, Status } from "@/lib/types";
 
 export type RepoConfig = { owner: string; project: number; repo: string };
 
@@ -17,7 +17,7 @@ const MAX_TEXT_BYTES = 256 * 1024;
 const FULL_SHA = /^[a-f0-9]{40}$/i;
 const PAGE_INFO = "pageInfo { hasNextPage endCursor }";
 const PERSON_FIELDS = "login avatarUrl";
-const PULL_FIELDS = "number url state isDraft";
+const PULL_FIELDS = "number url state isDraft mergeStateStatus";
 const REST_HEADERS = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": REST_VERSION };
 
 type GraphError = {
@@ -292,7 +292,83 @@ type Item<Content = IssueContent> = {
   isArchived: boolean;
   content: Content | { __typename: "DraftIssue" | "PullRequest" } | null;
 };
-type Pull = Omit<Issue["pulls"][number], "state"> & { state: "OPEN" | "MERGED" | "CLOSED"; isDraft: boolean };
+type Pull = Omit<Issue["pulls"][number], "state"> & {
+  state: "OPEN" | "MERGED" | "CLOSED"; isDraft: boolean; mergeStateStatus: string;
+};
+
+function pullState({ state, isDraft, mergeStateStatus }: Pull): Issue["pulls"][number]["state"] {
+  if (state !== "OPEN") return state;
+  if (isDraft) return "DRAFT";
+  return mergeStateStatus === "CLEAN" ? "READY" : "OPEN";
+}
+
+type RepositoryPull = Omit<PullRequest, "state"> & Pull;
+
+const REPOSITORY_PULL_FIELDS = `${PULL_FIELDS}
+          title headRefName baseRefName reviewDecision updatedAt
+          author { ${PERSON_FIELDS} url }`;
+type PullConnection = Connection<RepositoryPull> & { totalCount: number };
+
+async function repositoryPullPage(client: GitHubClient, config: RepoConfig, after: string | null, mine: boolean): Promise<PullConnection> {
+  if (mine) {
+    type ReviewPull = RepositoryPull & { timelineItems: { nodes: ({ createdAt: string; requestedReviewer: { login?: string } | null } | null)[] } };
+    const { search, viewer } = await client.graphql<{
+      viewer: { login: string }; search: Connection<ReviewPull> & { totalCount: number };
+    }>(`query RequestedReviews($query: String!, $after: String) {
+      viewer { login }
+      search(type: ISSUE, query: $query, first: 25, after: $after) {
+        totalCount: issueCount
+        ${PAGE_INFO}
+        nodes { ... on PullRequest {
+          ${REPOSITORY_PULL_FIELDS}
+          timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+            nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } } } }
+          }
+        } }
+      }
+    }`, { query: `repo:${config.owner}/${config.repo} is:pr is:open user-review-requested:@me sort:created-desc`, after });
+    return { ...search, nodes: search.nodes?.map(pull => {
+      if (!pull) return null;
+      const request = pull.timelineItems.nodes.slice().reverse().find(event => event?.requestedReviewer?.login === viewer.login);
+      return { ...pull, reviewRequestedAt: request?.createdAt };
+    }) ?? [] };
+  }
+  const { repository } = await client.graphql<{
+    repository: { nameWithOwner: string; pullRequests: Connection<RepositoryPull> & { totalCount: number } } | null;
+  }>(`query RepositoryPullRequests($owner: String!, $repo: String!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      nameWithOwner
+      pullRequests(first: 25, after: $after, states: [OPEN, CLOSED, MERGED], orderBy: {field: CREATED_AT, direction: DESC}) {
+        totalCount
+        ${PAGE_INFO}
+        nodes {
+          ${REPOSITORY_PULL_FIELDS}
+        }
+      }
+    }
+  }`, { owner: config.owner, repo: config.repo, after });
+  if (repository?.nameWithOwner.toLowerCase() !== `${config.owner}/${config.repo}`.toLowerCase()) {
+    throw new GitHubError("Configured GitHub repository is unavailable", 404);
+  }
+  return repository.pullRequests;
+}
+
+export async function readPullRequests(token: string, config: RepoConfig, after: string | null, mine = false): Promise<PullRequestPage> {
+  const { nodes, totalCount, pageInfo } = await repositoryPullPage(new GitHubClient(token), config, after, mine);
+  if (pageInfo.hasNextPage && (!pageInfo.endCursor || pageInfo.endCursor === after)) {
+    throw new GitHubError("GitHub returned an invalid pagination cursor", 502);
+  }
+  return {
+    pulls: (nodes ?? []).flatMap((pull) => {
+      if (!pull) return [];
+      const { number, url, title, author, headRefName, baseRefName, reviewDecision, updatedAt } = pull;
+      return [{ number, url, title, author, headRefName, baseRefName, reviewDecision, updatedAt, reviewRequestedAt: pull.reviewRequestedAt, state: pullState(pull) }];
+    }),
+    totalCount,
+    nextCursor: pageInfo.hasNextPage ? pageInfo.endCursor : null,
+  };
+}
+
 type BoardIssue = IssueContent & IssueFields & { assignees: Connection<Person>; pulls: Connection<Pull> | null };
 type BoardItem = Item<BoardIssue> & {
   status: { optionId?: string | null } | null;
@@ -479,9 +555,7 @@ export async function readBoard(token: string, config: RepoConfig): Promise<Boar
         statusId: item.status?.optionId ?? null,
         assignees,
         ...await readBlockers(client, issue, dependencies[index]),
-        pulls: pulls.map(({ number, url, state, isDraft }) => ({
-          number, url, state: state === "OPEN" && isDraft ? "DRAFT" : state,
-        })),
+        pulls: pulls.map((pull) => ({ number: pull.number, url: pull.url, state: pullState(pull) })),
       });
     }
   }

@@ -17,6 +17,10 @@ const icons = {
   layers: <><path d="m12 3 9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5"/></>,
   issue: <><circle cx="12" cy="12" r="8"/><path d="M12 9v6"/></>,
   pull: <><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10m9-9-3-3 3-3m-3 3h2a4 4 0 0 1 4 4v8"/></>,
+  pullDraft: <><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10m12 0v-2m0-3v-2m0-3V5" /></>,
+  pullReady: <><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></>,
+  pullMerged: <><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10m0-10a5 5 0 0 0 5 5h5"/></>,
+  pullClosed: <><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m7-9 6 8m0-8-6 8"/></>,
   person: <><circle cx="12" cy="8" r="3"/><path d="M5 19a7 7 0 0 1 14 0"/></>,
   grip: <><path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" strokeWidth="3"/></>,
   move: <><path d="M4 12h16m-4-4 4 4-4 4M8 8l-4 4 4 4"/></>,
@@ -77,22 +81,31 @@ export function Assignees({ people, showNames = false }: { people: Person[]; sho
   );
 }
 
-export function PullLinks({ pulls }: { pulls: Issue["pulls"] }) {
-  const states = {
-    DRAFT: { label: "Черновик", tone: "neutral" },
-    OPEN: { label: "Открыт", tone: "green" },
-    MERGED: { label: "Слит", tone: "purple" },
-    CLOSED: { label: "Закрыт", tone: "red" },
-  };
+export const pullStates = {
+  DRAFT: { label: "Черновик", tone: "neutral", icon: "pullDraft" },
+  OPEN: { label: "Открыт · готовность к слиянию не подтверждена", tone: "amber", icon: "pull" },
+  READY: { label: "Готов к слиянию", tone: "green", icon: "pullReady" },
+  MERGED: { label: "Слит", tone: "purple", icon: "pullMerged" },
+  CLOSED: { label: "Закрыт без слияния", tone: "red", icon: "pullClosed" },
+} as const;
+
+export function BlockedMark({ reason }: { reason: string }) {
+  return <span className="blocked-mark tone-red" role="img" title={reason} aria-label={reason}><Icon name="lock" size={14} /></span>;
+}
+
+export function PullLinks({ pulls, blockedReason }: { pulls: Issue["pulls"]; blockedReason?: string }) {
   if (!pulls.length) return null;
   return (
     <div className="pull-list">
-      {pulls.map((pull) => (
-        <a className={`pull-link nodrag tone-${states[pull.state].tone}`} key={pull.url}
-          href={pull.url} target="_blank" rel="noreferrer" aria-label={`PR #${pull.number}, ${states[pull.state].label}`}>
-          <Icon name="pull" size={13} /> #{pull.number} <span>{states[pull.state].label}</span>
-        </a>
-      ))}
+      {blockedReason && <BlockedMark reason={blockedReason} />}
+      {pulls.map((pull) => {
+        const { label, tone, icon } = pullStates[pull.state];
+        const text = `PR #${pull.number} · ${label}`;
+        return <a className={`pull-link nodrag nopan tone-${tone}`} key={pull.url}
+          href={pull.url} target="_blank" rel="noreferrer" draggable={false} aria-label={text} title={text}>
+          <Icon name={icon} size={14} /> #{pull.number}
+        </a>;
+      })}
     </div>
   );
 }

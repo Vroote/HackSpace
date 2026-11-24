@@ -28,7 +28,9 @@ async function runJob(job: StoredJob) {
       (latestAccess.private && !privateGenerationAllowed())) {
       throw new HttpError(403, "Доступ или разрешение на передачу файлов изменились");
     }
-    const graph = await generateArchitecture(files, { apiKey, model: process.env.DEEPSEEK_MODEL || "" });
+    const graph = await generateArchitecture(files, {
+      apiKey, model: process.env.DEEPSEEK_MODEL || "", comment: job.generation_comment ?? undefined,
+    });
     await completeJob(job, graph);
   } catch (error) {
     await failJob(job.id, error instanceof HttpError ? error.message : "Не удалось построить схему. Предыдущая версия сохранена.");

@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import type { Board, ArchitectureSnapshot, Job, Person, Result } from "./types";
+import type { Board, ArchitectureSnapshot, Job, Person, Result, DemoBuild } from "./types";
 
 let pool: Pool | undefined;
 
@@ -16,6 +16,7 @@ export type StoredSession = { id: string; token: string; person: Person };
 export type Approval = { id: string; workspace: string; session: string; sha: string; paths: string[]; hash: string; private: boolean; expires: number };
 export type StoredJob = {
   id: string; session_id: string; workspace: string; sha: string; paths: string[]; context_hash: string; private: boolean;
+  generation_comment: string | null;
 };
 
 export async function getSession(id: string) {
@@ -42,36 +43,40 @@ export async function sharedWorkspace(workspace: string) {
       'SELECT sha, graph, created_at AS "createdAt" FROM architecture_snapshots WHERE workspace = $1', [workspace]),
     database().query<Job>(
       "SELECT status, error FROM architecture_jobs WHERE workspace = $1 ORDER BY id DESC LIMIT 1", [workspace]),
-    database().query<Result>(
-      'SELECT id::text, sha, url, tested_at AS "testedAt", score, author FROM measurements WHERE workspace = $1 ORDER BY tested_at, id', [workspace]),
+    database().query<Result & { selection: DemoBuild | null }>(
+      `SELECT id::text, sha, url, tested_at AS "testedAt", score, author, suite, version,
+        CASE WHEN d.measurement_id IS NOT NULL THEN json_build_object('resultId', id::text, 'standUrl', d.stand_url, 'reason', d.reason) END AS selection
+      FROM measurements m LEFT JOIN demo_builds d ON d.workspace = m.workspace AND d.measurement_id = m.id
+      WHERE m.workspace = $1 ORDER BY tested_at, m.id`, [workspace]),
   ]);
-  return { architecture: architecture.rows[0] ?? null, job: job.rows[0] ?? null, results: results.rows };
+  return { architecture: architecture.rows[0] ?? null, job: job.rows[0] ?? null, demoBuild: results.rows.find(row => row.selection)?.selection ?? null,
+    results: results.rows.map(({ selection, ...result }) => result) };
 }
 
-export async function enqueue(approval: Approval) {
+export async function enqueue(approval: Approval, comment = "") {
   await database().query(
-    `INSERT INTO architecture_jobs (workspace, session_id, approval_id, sha, paths, context_hash, private)
-      VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
-    [approval.workspace, approval.session, approval.id, approval.sha, approval.paths, approval.hash, approval.private]);
+    `INSERT INTO architecture_jobs (workspace, session_id, approval_id, sha, paths, context_hash, private, generation_comment)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`,
+    [approval.workspace, approval.session, approval.id, approval.sha, approval.paths, approval.hash, approval.private, comment || null]);
 }
 
 export async function claimJob(workspace: string) {
   await database().query(
-    `UPDATE architecture_jobs SET status = 'failed', session_id = NULL, error = 'Время ожидания генерации истекло'
+    `UPDATE architecture_jobs SET status = 'failed', session_id = NULL, generation_comment = NULL, error = 'Время ожидания генерации истекло'
     WHERE workspace = $1 AND ((status = 'running' AND started_at < now() - interval '5 minutes')
       OR (status = 'pending' AND created_at < now() - interval '15 minutes'))`, [workspace]);
   const result = await database().query<StoredJob>(
     `UPDATE architecture_jobs SET status = 'running', started_at = now()
     WHERE id = (SELECT id FROM architecture_jobs WHERE workspace = $1 AND status = 'pending'
       ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
-    RETURNING id, workspace, session_id, sha, paths, context_hash, private`, [workspace]);
+    RETURNING id, workspace, session_id, sha, paths, context_hash, private, generation_comment`, [workspace]);
   return result.rows[0] ?? null;
 }
 
 export async function completeJob(job: StoredJob, graph: ArchitectureSnapshot["graph"]) {
   await database().query(
     `WITH finished AS (
-      UPDATE architecture_jobs SET status = 'complete', session_id = NULL
+      UPDATE architecture_jobs SET status = 'complete', session_id = NULL, generation_comment = NULL
       WHERE id = $1 AND status = 'running' RETURNING workspace, sha
     )
     INSERT INTO architecture_snapshots (workspace, sha, graph)
@@ -82,6 +87,14 @@ export async function completeJob(job: StoredJob, graph: ArchitectureSnapshot["g
 
 export async function failJob(id: string, error: string) {
   await database().query(
-    "UPDATE architecture_jobs SET status = 'failed', error = $2, session_id = NULL WHERE id = $1 AND status = 'running'",
+    "UPDATE architecture_jobs SET status = 'failed', error = $2, session_id = NULL, generation_comment = NULL WHERE id = $1 AND status = 'running'",
     [id, error]);
+}
+
+export async function saveDemoBuild(workspace: string, selection: DemoBuild) {
+  await database().query(
+    `INSERT INTO demo_builds (workspace, measurement_id, stand_url, reason) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (workspace) DO UPDATE SET measurement_id = EXCLUDED.measurement_id,
+         stand_url = EXCLUDED.stand_url, reason = EXCLUDED.reason`,
+    [workspace, selection.resultId, selection.standUrl, selection.reason]);
 }

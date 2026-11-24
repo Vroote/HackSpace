@@ -8,7 +8,7 @@ import {
 import type { Edge, Node, NodeProps, OnNodesChange } from "@xyflow/react";
 import type { ArchitectureSnapshot, Board, Issue, Status } from "@/lib/types";
 import type { analyzePipeline } from "@/lib/pipeline";
-import { Assignees, EmptyState, Icon, PullLinks, statusDisplay } from "./ui";
+import { Assignees, BlockedMark, EmptyState, Icon, PullLinks, statusDisplay } from "./ui";
 
 type Pipeline = ReturnType<typeof analyzePipeline>;
 type PlanNode = Node<{ issue: Issue; status?: Status; ready: boolean; reasons: string[] }, "issue">;
@@ -28,13 +28,18 @@ const handles = (
 
 function PlanCard({ data }: NodeProps<PlanNode>) {
   const status = statusDisplay(data.status);
+  const blocked = data.issue.blockersUnknown || data.issue.blockers.some((blocker) => !blocker.completed);
+  const blockedReason = blocked ? `Задача заблокирована: ${data.reasons.join("; ")}` : undefined;
   return (
-    <article className={`graph-card plan-card${data.reasons.length ? " has-blockers" : ""}`}>
+    <article className={`graph-card plan-card${blocked ? " has-blockers" : ""}`}>
       {handles}
       <div className="node-meta">
-        <a className="issue-number tone-green nodrag nopan" href={data.issue.url} target="_blank" rel="noreferrer">
-          <Icon name="issue" size={15} />#{data.issue.number}
-        </a>
+        <span className="inline">
+          <a className="issue-number tone-green nodrag nopan" href={data.issue.url} target="_blank" rel="noreferrer">
+            <Icon name="issue" size={15} />#{data.issue.number}
+          </a>
+          {blockedReason && !data.issue.pulls.length && <BlockedMark reason={blockedReason} />}
+        </span>
         <span className={`pill tone-${status.tone}`}><i className="status-dot" />{status.label}</span>
       </div>
       <a className="issue-title nodrag nopan" href={data.issue.url} target="_blank" rel="noreferrer">{data.issue.title}</a>
@@ -42,10 +47,9 @@ function PlanCard({ data }: NodeProps<PlanNode>) {
         <Assignees people={data.issue.assignees} showNames />
         {data.ready && <span className="card-flag tone-green"><Icon name="ready" size={13} />Можно брать</span>}
       </div>
-      <PullLinks pulls={data.issue.pulls} />
+      <PullLinks pulls={data.issue.pulls} blockedReason={blockedReason} />
       {data.reasons.length > 0 && (
-        <div className="node-warning tone-amber">
-          <Icon name="lock" size={14} />
+        <div className={`node-warning tone-${blocked ? "red" : "amber"}`}>
           <ul>{data.reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul>
         </div>
       )}
@@ -145,7 +149,6 @@ export function DependencyGraph({ board, analysis, readyIds }: { board: Board; a
   const layout = useCallback((heights: Heights) => {
     const issues = new Map(board.issues.map((issue) => [issue.id, issue]));
     const statuses = new Map(board.statuses.map((status) => [status.id, status]));
-    const inPlan = new Set([...analysis.columns.flat(), ...analysis.unresolvedIds]);
     const nodes: CanvasNode[] = [];
 
     function place(ids: string[], x: number, label: string, unresolved = false) {
@@ -156,21 +159,11 @@ export function DependencyGraph({ board, analysis, readyIds }: { board: Board; a
         const issue = issues.get(id);
         if (!issue) continue;
         const reasons = analysis.reasons[id] ?? [];
-        const fallback: string[] = [];
-        if (!reasons.length) {
-          if (issue.blockersUnknown) fallback.push("Часть зависимостей недоступна.");
-          for (const blocker of issue.blockers) {
-            if (blocker.completed) continue;
-            if (blocker.state === "CLOSED") fallback.push(`#${blocker.number} закрыта без выполнения · ${blocker.title}`);
-            else if (!inPlan.has(blocker.id)) fallback.push(`Внешний блокер #${blocker.number} · ${blocker.title}`);
-          }
-          if (unresolved && !fallback.length) fallback.push("Задача входит в цикл зависимостей или зависит от него.");
-        }
         nodes.push({
           id, type: "issue", position: { x, y }, style: { width: planWidth },
-          data: { issue, ready: readyIds.has(id), status: statuses.get(issue.statusId ?? ""), reasons: reasons.length ? reasons : fallback },
+          data: { issue, ready: readyIds.has(id), status: statuses.get(issue.statusId ?? ""), reasons },
         });
-        y += (heights[id] ?? (130 + (issue.pulls.length ? 38 : 0) + (reasons.length || fallback.length ? 62 : 0))) + 26;
+        y += (heights[id] ?? (130 + (issue.pulls.length ? 38 : 0) + (reasons.length ? 62 : 0))) + 26;
       }
     }
 
@@ -200,7 +193,7 @@ export function DependencyGraph({ board, analysis, readyIds }: { board: Board; a
         <div className="canvas-legend">
           <span><i className="legend-edge" /> Блокирует</span>
           <span className="tone-green"><Icon name="ready" size={14} /> Можно брать</span>
-          <span className="tone-amber"><Icon name="lock" size={14} /> Есть препятствия</span>
+          <span className="tone-red"><Icon name="lock" size={14} /> Заблокирована</span>
         </div>
       </div>
       <GraphCanvas label="Граф зависимостей задач" layout={layout} edges={edges} />

@@ -1,12 +1,12 @@
 import type { NextRequest } from "next/server";
 import { checkOrigin, demoRequest, liveSession } from "./auth";
 import { demoMode, HttpError, privateGenerationAllowed, workspaceKey } from "./config";
-import { cacheBoard, cachedBoard, database, enqueue, sharedWorkspace, type Approval } from "./db";
-import { demoCommit, demoWorkspace } from "./demo";
-import { changeStatus, GitHubError, getTree, readBoard, verifyCommit } from "./github";
-import { measurement, requestBody, statusChange } from "./http";
+import { cacheBoard, cachedBoard, database, enqueue, saveDemoBuild, sharedWorkspace, type Approval } from "./db";
+import { demoCommit, demoPullRequests, demoWorkspace } from "./demo";
+import { changeStatus, GitHubError, getTree, readBoard, readPullRequests, verifyCommit } from "./github";
+import { demoBuildInput, measurement, requestBody, statusChange } from "./http";
 import { randomToken, sign, verify } from "./crypto";
-import { selectPaths } from "./architecture";
+import { normalizeArchitectureComment, selectPaths } from "./architecture";
 import { architectureFiles, contextHash } from "./context-files";
 import type { Board, Workspace } from "./types";
 
@@ -60,6 +60,16 @@ export async function workspace(request: NextRequest) {
   return assemble(await context(request));
 }
 
+export async function workspacePullRequests(request: NextRequest) {
+  const current = await context(request);
+  const after = request.nextUrl.searchParams.get("after");
+  if (after !== null && (!after.trim() || after.length > 1024 || !current)) {
+    throw new HttpError(422, "Некорректный курсор списка PR.");
+  }
+  const mine = request.nextUrl.searchParams.get("review") === "mine";
+  return current ? readPullRequests(current.token, current.config, after, mine) : demoPullRequests(mine);
+}
+
 export async function refreshWorkspace(request: NextRequest) {
   const current = await context(request, true);
   if (!current) demoWorkspace().board.refreshedAt = new Date().toISOString();
@@ -100,8 +110,8 @@ export async function addMeasurement(request: NextRequest) {
     state.results.push({ ...input, ...commit, id: randomToken(), author });
   } else {
     const inserted = await database().query<{ id: string }>(
-      "INSERT INTO measurements (workspace, sha, url, tested_at, score, author) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id::text",
-      [workspaceKey(current.config), commit.sha, commit.url, input.testedAt, input.score, author]);
+      "INSERT INTO measurements (workspace, sha, url, tested_at, score, author, suite, version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id::text",
+      [workspaceKey(current.config), commit.sha, commit.url, input.testedAt, input.score, author, input.suite, input.version]);
     state.results.push({ ...input, ...commit, id: inserted.rows[0].id, author });
   }
   state.results.sort((left, right) => Date.parse(left.testedAt) - Date.parse(right.testedAt));
@@ -125,8 +135,15 @@ export async function previewArchitecture(request: NextRequest) {
 
 export async function startArchitecture(request: NextRequest) {
   const current = await context(request, true);
-  const { approval, confirmed } = await requestBody(request);
+  const { approval, confirmed, comment: rawComment } = await requestBody(request);
   if (typeof approval !== "string" || confirmed !== true) throw new HttpError(422, "Подтвердите точный список файлов");
+  let comment: string;
+  try {
+    comment = normalizeArchitectureComment(rawComment);
+  } catch (error) {
+    if (error instanceof Error) throw new HttpError(422, error.message);
+    throw error;
+  }
   if (!current) {
     if (approval !== "demo") throw new HttpError(422, "Сначала получите список файлов");
     const state = demoWorkspace();
@@ -141,7 +158,22 @@ export async function startArchitecture(request: NextRequest) {
     throw new HttpError(422, "Подтверждение недействительно. Получите новый список файлов.");
   }
   const state = await assemble(current);
-  await enqueue(valid);
+  await enqueue(valid, comment);
   const saved = await sharedWorkspace(valid.workspace);
   return { ...state, ...saved };
+}
+
+export async function selectDemoBuild(request: NextRequest) {
+  const current = await context(request, true);
+  if (current) writeAccess(current);
+  const selection = demoBuildInput(await requestBody(request));
+  const state = await assemble(current);
+  if (!state.results.some(result => result.id === selection.resultId)) {
+    throw new HttpError(422, "Замер не найден в этом проекте");
+  }
+  if (current) {
+    await saveDemoBuild(workspaceKey(current.config), selection);
+  }
+  state.demoBuild = selection;
+  return state;
 }

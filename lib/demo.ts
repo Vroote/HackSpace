@@ -1,4 +1,4 @@
-import type { Blocker, Board, Issue, Person, Workspace } from "./types";
+import type { Blocker, Board, Issue, Person, PullRequest, PullRequestPage, Workspace } from "./types";
 
 const repoUrl = "https://github.com/hackspace-demo/relay";
 const commits = Array.from({ length: 8 }, (_, index) =>
@@ -26,10 +26,12 @@ function blocker(task: Issue): Blocker {
 function seed(): Workspace {
   const setup = issue(6, "Подготовить окружение проекта", "done", [people[1]], [], 18);
   const api = issue(12, "Реализовать контракт API", "progress", [people[0]], [blocker(setup)], 26);
-  const dataset = issue(13, "Подготовить датасет", "todo", [people[1]]);
+  const dataset = issue(13, "Подготовить датасет", "todo", [people[1]], [], 35);
   const design = issue(14, "Собрать макет интерфейса", "progress", [people[3]], [], 28);
+  design.pulls[0].state = "READY";
   const storage = issue(16, "Подключить хранилище результатов", "todo", [people[2]], [blocker(api)]);
-  const evaluation = issue(17, "Настроить оценку модели", "todo", [people[0], people[1]], [blocker(dataset), blocker(api)]);
+  const evaluation = issue(17, "Настроить оценку модели", "todo", [people[0], people[1]], [blocker(dataset), blocker(api)], 31);
+  evaluation.pulls[0].state = "DRAFT";
   const ui = issue(19, "Собрать интерфейс результатов", "todo", [people[3]], [blocker(design)]);
   const release = issue(21, "Протестировать сборку целиком", "todo", [], [blocker(storage), blocker(evaluation), blocker(ui)]);
   const brief = issue(22, "Обновить инструкцию для команды", "todo", []);
@@ -57,8 +59,9 @@ function seed(): Workspace {
         ],
       },
     },
+    demoBuild: null,
     results: [36, 51, 47, 64, 70, 65, 81, 86].map((score, index) => ({
-      id: String(index + 1), sha: commits[index], url: `${repoUrl}/commit/${commits[index]}`, score,
+      suite: "validation", version: index < 4 ? "v1" : "v2", id: String(index + 1), sha: commits[index], url: `${repoUrl}/commit/${commits[index]}`, score,
       testedAt: new Date(now - (7 - index) * 14_400_000).toISOString(), author: people[index % people.length].login,
     })),
   };
@@ -68,6 +71,26 @@ const memory = globalThis as typeof globalThis & { hackspaceDemo?: Workspace };
 
 export function demoWorkspace() {
   return memory.hackspaceDemo ??= seed();
+}
+
+export function demoPullRequests(mine = false): PullRequestPage {
+  const now = Date.now();
+  const entries = [
+    { number: 35, title: "Подготовить тестовую выборку", state: "OPEN", login: "alex", branch: "test-dataset", review: "REVIEW_REQUIRED" },
+    { number: 34, title: "Заменить устаревший экспорт отчёта", state: "CLOSED", login: "dasha", branch: "old-report-export", review: null },
+    { number: 31, title: "Добавить оценку модели", state: "DRAFT", login: "mira", branch: "model-evaluation", review: null },
+    { number: 28, title: "Добавить макет интерфейса", state: "READY", login: "dasha", branch: "interface-layout", review: "APPROVED" },
+    { number: 26, title: "Реализовать контракт API", state: "OPEN", login: "mira", branch: "api-contract", review: "CHANGES_REQUESTED" },
+    { number: 18, title: "Настроить окружение разработки", state: "MERGED", login: "alex", branch: "project-setup", review: "APPROVED" },
+  ] as const;
+  const pulls: PullRequest[] = entries.filter((entry) => !mine || entry.number === 35).map((entry, index) => ({
+    number: entry.number, url: `${repoUrl}/pull/${entry.number}`, title: entry.title, state: entry.state,
+    author: { login: entry.login, avatarUrl: "", url: `https://github.com/${entry.login}` },
+    headRefName: entry.branch, baseRefName: "main", reviewDecision: entry.review,
+    reviewRequestedAt: entry.number === 35 ? new Date(now - 7_200_000).toISOString() : undefined,
+    updatedAt: new Date(now - (index + 1) * 3_600_000).toISOString(),
+  }));
+  return { pulls, totalCount: pulls.length, nextCursor: null };
 }
 
 export function demoCommit(sha: string) {

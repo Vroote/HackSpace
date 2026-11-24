@@ -1,16 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzePipeline } from "@/lib/pipeline";
-import type { Issue, Workspace } from "@/lib/types";
+import { UnblockedNotifications } from "@/components/unblocked-notifications";
+import { analyzePipeline, resolveProjectBlockers } from "@/lib/pipeline";
+import { ARCHITECTURE_COMMENT_LIMIT } from "@/lib/types";
+import type { Issue, PullRequestPage, Workspace } from "@/lib/types";
 import { ArchitectureGraph, DependencyGraph } from "@/components/graphs";
 import { Kanban } from "@/components/kanban";
+import { PullRequestsView } from "@/components/pull-requests";
 import { ResultsView } from "@/components/results";
 import type { ResultInput } from "@/components/results";
 import { Avatar, EmptyState, Icon, Notice, formatDate } from "@/components/ui";
 
 const tabs = [
   { id: "tasks", label: "Задачи", icon: "board", description: "Доска задач команды в GitHub Projects." },
+  { id: "pulls", label: "Pull Requests", icon: "pull", description: "Все PR репозитория, в том числе не связанные с задачами." },
   { id: "plan", label: "План задач", icon: "plan", description: "Открытые задачи репозитория и порядок их выполнения." },
   { id: "architecture", label: "Архитектура", icon: "architecture", description: "Карта компонентов репозитория и связей между ними." },
   { id: "results", label: "Результаты", icon: "chart", description: "Замеры внешних тестов по коммитам." },
@@ -46,11 +50,20 @@ function errorMessage(error: unknown) {
   return error instanceof ApiError ? error.message : "Не удалось связаться с сервером. Попробуйте ещё раз.";
 }
 
-function ApprovalDialog({ preview, demo, busy, onCancel, onConfirm }: {
-  preview: ArchitecturePreview; demo: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void;
+function loadPullRequests(cursor: string | null, signal: AbortSignal, mine: boolean) {
+  const query = new URLSearchParams();
+  if (cursor) query.set("after", cursor);
+  if (mine) query.set("review", "mine");
+  return request<PullRequestPage>(`/api/pulls?${query}`, { signal });
+}
+
+function ApprovalDialog({ preview, demo, busy, error, onCancel, onConfirm }: {
+  preview: ArchitecturePreview; demo: boolean; busy: boolean; error: string | null;
+  onCancel: () => void; onConfirm: (comment: string) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [comment, setComment] = useState("");
 
   useEffect(() => {
     const element = dialog.current;
@@ -73,13 +86,21 @@ function ApprovalDialog({ preview, demo, busy, onCancel, onConfirm }: {
       <ul className="approval-files">
         {preview.files.map((file, index) => <li key={index}><Icon name="file" size={15} /><code>{file}</code></li>)}
       </ul>
+      <label htmlFor="architecture-comment" className="approval-comment-label">Комментарий к схеме <span className="muted">· необязательно</span></label>
+      <textarea id="architecture-comment" className="approval-comment" rows={3} maxLength={ARCHITECTURE_COMMENT_LIMIT}
+        value={comment} onChange={(event) => setComment(event.target.value)} disabled={busy}
+        aria-describedby="architecture-comment-hint" placeholder="Например: покажи подробнее, как результаты попадают в базу" />
+      <p id="architecture-comment-hint" className="muted approval-comment-hint">
+        {demo ? "В демо комментарий не отправляется." : "Комментарий будет отправлен в DeepSeek вместе с файлами. Не добавляйте секреты."}
+      </p>
       {preview.private && !demo && <label className="approval-check">
         <input type="checkbox" checked={confirmed} disabled={busy} onChange={(event) => setConfirmed(event.target.checked)} />
         Разрешаю отправку перечисленных приватных файлов в DeepSeek
       </label>}
+      {error && <Notice tone="red" role="alert">{error}</Notice>}
       <div className="dialog-actions">
         <button className="button" type="button" onClick={onCancel} disabled={busy}>Отмена</button>
-        <button className="button button-primary" type="button" onClick={onConfirm} disabled={busy || (preview.private && !demo && !confirmed)}>
+        <button className="button button-primary" type="button" onClick={() => onConfirm(comment.trim())} disabled={busy || (preview.private && !demo && !confirmed)}>
           <Icon name="architecture" size={16} />{busy ? "Запускаем…" : demo ? "Запустить симуляцию" : "Подтвердить и запустить"}
         </button>
       </div>
@@ -131,16 +152,18 @@ export default function Home() {
   const jobStatus = workspace?.job?.status;
   const jobActive = jobStatus === "pending" || jobStatus === "running";
 
+  const hasWorkspace = Boolean(workspace);
   useEffect(() => {
-    if (!jobActive) return;
+    if (!hasWorkspace) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
 
     async function poll() {
-      if (!mutation.current) {
+      if (!mutation.current && (jobActive || !document.hidden)) {
         const version = revision.current;
         try {
-          const data = await request<Workspace>("/api/workspace", { signal: controller.signal });
+          const data = jobActive ? await request<Workspace>("/api/workspace", { signal: controller.signal })
+            : await request<Workspace>("/api/refresh", { method: "POST", signal: controller.signal });
           if (controller.signal.aborted) return;
           if (version === revision.current) {
             setWorkspace(data);
@@ -159,17 +182,17 @@ export default function Home() {
           }
         }
       }
-      timer = setTimeout(poll, 2500);
+      timer = setTimeout(poll, jobActive ? 2500 : 120_000);
     }
 
-    timer = setTimeout(poll, 1800);
+    timer = setTimeout(poll, jobActive ? 1800 : 120_000);
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [jobActive]);
+  }, [jobActive, hasWorkspace]);
 
-  const originalBoard = workspace?.board;
+  const originalBoard = useMemo(() => workspace && resolveProjectBlockers(workspace.board), [workspace]);
   const board = useMemo(() => {
     if (!originalBoard || !pendingMove) return originalBoard;
     return { ...originalBoard, issues: originalBoard.issues.map((issue) =>
@@ -231,15 +254,12 @@ export default function Home() {
     });
   }
 
-  function generateArchitecture() {
+  function generateArchitecture(comment: string) {
     if (!preview) return;
     void run("generate", async () => {
-      try {
-        setWorkspace(await request<Workspace>("/api/architecture", jsonRequest("POST", { approval: preview.approval, confirmed: true })));
-        setPollError(null);
-      } finally {
-        setPreview(null);
-      }
+      setWorkspace(await request<Workspace>("/api/architecture", jsonRequest("POST", { approval: preview.approval, confirmed: true, comment })));
+      setPollError(null);
+      setPreview(null);
     });
   }
 
@@ -313,7 +333,7 @@ export default function Home() {
                 {tab === "tasks" && <a className="button" href={board.projectUrl} target="_blank" rel="noreferrer">
                   <Icon name="github" size={17} />Проект на GitHub<Icon name="external" size={14} />
                 </a>}
-                {tab !== "results" && (
+                {tab !== "results" && tab !== "pulls" && (
                   <button className="button" type="button" disabled={Boolean(busy)} onClick={refresh}>
                     <span className={busy === "refresh" ? "spinning" : "inline"}><Icon name="refresh" size={17} /></span>
                     {busy === "refresh" ? "Обновляем…" : tab === "plan" ? "Обновить план" : "Обновить"}
@@ -326,12 +346,14 @@ export default function Home() {
               </div>
             </div>
 
-            {error && <Notice tone="red" role="alert">{error}</Notice>}
+            <UnblockedNotifications key={JSON.stringify([board.projectUrl, board.repoUrl, workspace.user.login])} board={originalBoard!} login={workspace.user.login} />
+            {error && !preview && <Notice tone="red" role="alert">{error}</Notice>}
             {(tab === "tasks" || tab === "plan") && board.stale && (
               <Notice>GitHub временно недоступен. Показаны данные последнего успешного обновления.</Notice>
             )}
 
-            {tab === "tasks" && <Kanban board={board} readyIds={readyIds} canWrite={workspace.canWrite} busy={Boolean(busy)} onMove={move} />}
+            {tab === "tasks" && <Kanban board={board} canWrite={workspace.canWrite} busy={Boolean(busy)} onMove={move} />}
+            {tab === "pulls" && <PullRequestsView issues={board.issues} loadPage={loadPullRequests} />}
             {tab === "plan" && <DependencyGraph board={board} analysis={analysis} readyIds={readyIds} />}
             {(tab === "tasks" || tab === "plan") && <div className="sync-stamp muted" role="status">
               <Icon name="clock" size={15} /> Последнее обновление <time dateTime={board.refreshedAt}>{formatDate(board.refreshedAt)}</time>
@@ -360,12 +382,13 @@ export default function Home() {
               </EmptyState>}
             </>}
             {tab === "results" && <ResultsView results={workspace.results} canWrite={workspace.canWrite} busy={Boolean(busy)}
-              defaultSha={workspace.defaultSha} onSubmit={addResult} />}
+              defaultSha={workspace.defaultSha} onSubmit={addResult} demoBuild={workspace.demoBuild}
+              onSelect={value => run("result", async () => setWorkspace(await request<Workspace>("/api/results", jsonRequest("PATCH", value))))} />}
           </>
         )}
       </main>
-      {preview && workspace && <ApprovalDialog preview={preview} demo={workspace.demo} busy={busy === "generate"}
-        onCancel={() => setPreview(null)} onConfirm={generateArchitecture} />}
+      {preview && workspace && <ApprovalDialog preview={preview} demo={workspace.demo} busy={busy === "generate"} error={error}
+        onCancel={() => { setError(null); setPreview(null); }} onConfirm={generateArchitecture} />}
     </>
   );
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzePipeline } from "../lib/pipeline";
+import { analyzePipeline, observeUnlocks, resolveProjectBlockers, type UnlockHistory } from "../lib/pipeline";
 import type { Blocker, Board, Issue } from "../lib/types";
 
 function blocker(id: string, state: Blocker["state"] = "OPEN", completed = false): Blocker {
@@ -46,4 +46,22 @@ test("only completed dependencies are resolved, even across projects", () => {
   assert.match(result.reasons["2"][0], /не как выполненный/);
   assert.match(result.reasons["3"][0], /проверить/);
   assert.deepEqual(analyzePipeline(board([task("4")], true)).readyIds, []);
+});
+
+test("only the last confirmed blocker unlocks an assigned task", () => {
+  const snapshot = board([task("1"), task("2"), task("3", [blocker("1"), blocker("2")], {
+    assignees: [{ login: "Me", avatarUrl: "" }],
+  })]);
+  const observe = (history: UnlockHistory) => observeUnlocks(resolveProjectBlockers(snapshot), "me", history);
+  const initial = observe({ blocked: [], unread: [] });
+  assert.deepEqual(initial.blocked, ["3"]);
+  snapshot.issues[0].statusId = "done";
+  assert.deepEqual(observe(initial), initial);
+  snapshot.issues[1].statusId = "done";
+  snapshot.stale = true;
+  assert.deepEqual(observe(initial), initial);
+  snapshot.stale = false;
+  const ready = observe(initial);
+  assert.deepEqual(ready, { blocked: [], unread: ["3"] });
+  assert.deepEqual(observe({ blocked: [], unread: [] }).unread, []);
 });
